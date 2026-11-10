@@ -1,38 +1,38 @@
-<p align="center"><img src="docs/icon.png" width="96" alt="Color Tuner icon"></p>
+<p align="center"><img src="docs/icon.png" width="96" alt="Значок Color Tuner"></p>
 
 <h1 align="center">Color Tuner</h1>
 
-<p align="center"><b>English</b> · <a href="README.ru.md">Русский</a></p>
+<p align="center"><b>Русский</b> · <a href="README.en.md">English</a></p>
 
-A small GTK4 app with sliders for your monitor's **black level, white level, gamma and RGB balance**: a "desktop color settings" panel for Linux on **GNOME + Wayland**, where `xgamma`, `redshift` and `nvidia-settings` color controls no longer work.
+Небольшая программа на GTK4 с ползунками для **уровня чёрного, уровня белого, гаммы и баланса RGB** монитора. Это аналог «Регулировки цвета рабочего стола» из панели NVIDIA для Linux с **GNOME + Wayland**, где `xgamma`, `redshift` и настройки цвета в `nvidia-settings` больше не работают.
 
-It also lets you **emulate limited RGB range (16–235)**, so the picture can match a Windows PC whose GPU outputs limited range over HDMI, even when your Linux driver can't switch the range (for example NVIDIA on Wayland: *"Ignoring unsupported RGB Range"*).
+Программа умеет **имитировать ограниченный диапазон RGB (16–235)**. Так картинку можно сделать как в Windows, если там видеокарта выводит по HDMI ограниченный диапазон, а драйвер в Linux переключать диапазон не умеет. Например, NVIDIA на Wayland пишет в журнал *«Ignoring unsupported RGB Range»*.
 
-## How it works
+## Как это работает
 
-Wayland gives apps no way to change display gamma directly. But GNOME loads the **calibration curve (`vcgt`)** of the monitor's default ICC profile into the graphics card. Color Tuner:
+На Wayland программы не могут напрямую менять гамму экрана. Но GNOME загружает в видеокарту **калибровочную кривую (`vcgt`)** из основного ICC-профиля монитора. Color Tuner:
 
-1. takes the ICC profile GNOME generated from your monitor's EDID (`~/.local/share/icc/edid-*.icc`);
-2. builds a copy with a calibration curve made from the slider values;
-3. registers it in **colord** and makes it the monitor's default profile.
+1. берёт ICC-профиль, который GNOME создал из данных EDID монитора (`~/.local/share/icc/edid-*.icc`);
+2. делает его копию с калибровочной кривой по значениям ползунков;
+3. регистрирует её в **colord** и делает основным профилем монитора.
 
-Changes apply about 0.3 s after you move a slider. Nothing runs in the background: the profile stays on the monitor after you close the app and after a reboot.
+Изменения применяются примерно через 0,3 с после движения ползунка. В фоне ничего не работает: профиль остаётся на мониторе и после закрытия программы, и после перезагрузки.
 
-## Features
+## Возможности
 
-- Black level and white level (including **Limited 16–235** and **Full 0–255** presets)
-- Gamma
-- Red / green / blue gain (white balance)
-- A gray-scale strip for checking shadow and highlight detail
-- Monitor selection for multi-monitor setups
-- One button turns the correction off (removes the profile)
-- English and Russian interface (picked automatically from the system language)
+- Уровень чёрного и уровень белого, есть готовые варианты **«Ограниченный 16–235»** и **«Полный 0–255»**
+- Гамма
+- Усиление красного, зелёного и синего (баланс белого)
+- Шкала серого, чтобы проверить различимость теней и светов
+- Выбор монитора, если их несколько
+- Кнопка выключения коррекции (убирает профиль)
+- Интерфейс на русском и английском, язык выбирается по языку системы
 
-Saturation ("digital vibrance") is **not** possible: a calibration curve can only change each channel's brightness.
+Насыщенность («цифровую интенсивность») сделать **нельзя**: калибровочная кривая меняет только яркость каждого канала.
 
-## Requirements
+## Что нужно
 
-- GNOME on Wayland or X11 (colord-based color management)
+- GNOME на Wayland или X11 (управление цветом через colord)
 - Python 3.10+, PyGObject, GTK 4
 - `colord`
 
@@ -45,7 +45,7 @@ sudo dnf install python3-gobject gtk4 colord
 sudo pacman -S python-gobject gtk4 colord
 ```
 
-## Install
+## Установка
 
 ```bash
 git clone https://github.com/MrGipso/color-tuner.git
@@ -53,33 +53,33 @@ cd color-tuner
 ./install.sh
 ```
 
-It installs into `~/.local` for the current user, no `sudo` needed. Then open **Color Tuner** from the app menu.
+Программа ставится в `~/.local` для текущего пользователя, `sudo` не нужен. Потом откройте **«Настройка цвета монитора»** в меню приложений.
 
-To uninstall, first press **"Turn correction off"** in the app, then run:
+Удаление: сначала нажмите в программе **«Выключить коррекцию»**, потом выполните:
 
 ```bash
 ./uninstall.sh
 ```
 
-## Usage tips
+## Советы
 
-- If the gray strip's darkest steps (0–24) merge into one, lower **Black level** or raise **Gamma**. If the brightest steps (235–255) merge, raise **White level**.
-- To match a Windows PC set to *Limited* dynamic range in the NVIDIA Control Panel, press **Limited (16–235)**. A better fix is usually setting Windows to *Full*, then using **Full (0–255)** here.
-- The app needs the EDID profile that GNOME creates. If it reports that it's missing, open **Settings → Color** once.
+- Если самые тёмные ступени шкалы серого (0–24) сливаются, уменьшите **уровень чёрного** или увеличьте **гамму**. Если сливаются самые светлые (235–255), увеличьте **уровень белого**.
+- Чтобы было как в Windows с «Ограниченным» динамическим диапазоном в панели NVIDIA, нажмите **«Ограниченный (16–235)»**. Но обычно лучше поставить в Windows «Полный», а здесь выбрать **«Полный (0–255)»**.
+- Программе нужен EDID-профиль, который создаёт GNOME. Если она пишет, что его нет, откройте один раз **«Настройки → Управление цветом»**.
 
-## Files
+## Где файлы
 
-| What | Where |
+| Что | Где |
 | --- | --- |
-| Program | `~/.local/bin/color-tuner` |
-| Generated profiles | `~/.local/share/icc/color-tuner-*.icc` (old ones are deleted automatically) |
-| Settings | `~/.config/color-tuner.json` |
+| Программа | `~/.local/bin/color-tuner` |
+| Созданные профили | `~/.local/share/icc/color-tuner-*.icc` (старые удаляются сами) |
+| Настройки | `~/.config/color-tuner.json` |
 
-## Troubleshooting
+## Если что-то не так
 
-- **Nothing changes on screen.** Check that the profile is active: `colormgr get-devices-by-kind display`. The `color-tuner-…` profile must come first. Some drivers or compositors ignore `vcgt` curves. Night Light uses the same gamma ramp, so if Night Light works, Color Tuner should too.
-- **HDR is on.** GNOME ignores ICC profiles in HDR mode. Turn HDR off.
+- **На экране ничего не меняется.** Проверьте, что профиль включён: `colormgr get-devices-by-kind display`. Профиль `color-tuner-…` должен стоять первым. Некоторые драйверы или оконные менеджеры не применяют кривые `vcgt`. Ночной свет работает через ту же таблицу гаммы: если он работает, Color Tuner тоже должен.
+- **Включён HDR.** В режиме HDR GNOME не применяет ICC-профили. Выключите HDR.
 
-## License
+## Лицензия
 
 [MIT](LICENSE)
