@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""Color Tuner — sliders for the monitor calibration curve (GNOME / Wayland / colord).
+
+The program builds an ICC profile from the monitor's EDID profile, adds a
+calibration curve (vcgt) to it and makes it the monitor's default profile via
+colord. GNOME (mutter) then loads that curve into the graphics card.
+"""
+import hashlib
+import json
+import locale
+import os
+import struct
+import sys
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gio, GLib, Gtk  # noqa: E402
+
+__version__ = "1.0.0"
+APP_ID = "io.github.MrGipso.ColorTuner"
+ICC_DIR = os.path.join(GLib.get_user_data_dir(), "icc")
+CONF = os.path.join(GLib.get_user_config_dir(), "color-tuner.json")
+PREFIX = "color-tuner-"
+CD = "org.freedesktop.ColorManager"
+
+DEFAULTS = {"black": 0.0, "white": 255.0, "gamma": 1.0,
+            "red": 100.0, "green": 100.0, "blue": 100.0}
+
+# ---------------------------------------------------------------- i18n
+TEXT = {
+    "en": {
+        "title": "Color Tuner",
+        "black": "Black level",
+        "white": "White level",
+        "gamma": "Gamma (higher = brighter midtones)",
+        "red": "Red, %",
+        "green": "Green, %",
+        "blue": "Blue, %",
+        "limited": "Limited (16–235)",
+        "full": "Full (0–255)",
+        "reset": "Reset colors",
+        "off": "Turn correction off (remove profile)",
+        "gray": "Gray scale: the darkest steps should be distinguishable, the brightest too",
+        "hint": "Move the sliders — changes apply immediately.",
+        "no_monitors": "No monitors found",
+        "no_device": "Monitor not found in colord.",
+        "no_edid": "Monitor EDID profile (edid-*.icc) not found. "
+                   "Open Settings → Color once so GNOME creates it.",
+        "applied": "Applied: ",
+        "turned_off": "Correction is off: the Color Tuner profile was removed from the monitor.",
+        "error": "colord error: ",
+    },
+    "ru": {
+        "title": "Настройка цвета монитора",
+        "black": "Уровень чёрного",
+        "white": "Уровень белого",
+        "gamma": "Гамма (больше — светлее средние тона)",
+        "red": "Красный, %",
+        "green": "Зелёный, %",
+        "blue": "Синий, %",
+        "limited": "Ограниченный (16–235)",
+        "full": "Полный (0–255)",
+        "reset": "Сбросить цвета",
+        "off": "Выключить коррекцию (убрать профиль)",
+        "gray": "Шкала серого: самые тёмные ступени должны различаться, самые светлые — тоже",
+        "hint": "Двигайте ползунки — изменения применяются сразу.",
+        "no_monitors": "Мониторы не найдены",
+        "no_device": "Монитор не найден в colord.",
+        "no_edid": "Не найден EDID-профиль монитора (edid-*.icc). "
+                   "Откройте один раз «Настройки → Управление цветом», чтобы GNOME его создал.",
+        "applied": "Применено: ",
+        "turned_off": "Коррекция выключена: профиль Color Tuner убран с монитора.",
+        "error": "Ошибка colord: ",
+    },
+}
+
+
+def detect_lang():
+    for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        val = os.environ.get(var)
+        if val:
+            return "ru" if val.lower().startswith("ru") else "en"
+    loc = locale.getlocale()[0] or ""
+    return "ru" if loc.lower().startswith("ru") else "en"
+
+
+T = TEXT[detect_lang()]
+
+
+# ---------------------------------------------------------------- ICC builder
+def curve(p, gain):
+    out = []
+    for i in range(256):
+        x = (i / 255.0) ** (1.0 / p["gamma"])
+        top = p["white"] * gain / 100.0
+        y = p["black"] + (top - p["black"]) * x
+        y = min(max(y / 255.0, 0.0), 1.0)
+        out.append(round(y * 65535))
+    return out
+
+
+def mluc(text):
+    t = text.encode("utf-16-be")
+    return (b"mluc" + b"\0" * 4 + struct.pack(">II", 1, 12) + b"enUS"
+            + struct.pack(">II", len(t), 28) + t)
+
+
+def build_profile(base_bytes, p, name):
+    """Copy all tags of the base profile, replace desc, drop meta, add vcgt."""
+    d = base_bytes
+    n = struct.unpack(">I", d[128:132])[0]
+    tags = [struct.unpack(">4sII", d[132 + 12 * i:144 + 12 * i]) for i in range(n)]
+    vcgt = (b"vcgt" + b"\0" * 4 + struct.pack(">IHHH", 0, 3, 256, 2)
+            + b"".join(struct.pack(">256H", *curve(p, p[c])) for c in ("red", "green", "blue")))
+    order = [(b"desc", ("new", mluc(name)))]
+    order += [(s, ("src", o, l)) for s, o, l in tags if s not in (b"desc", b"meta", b"vcgt")]
+    order.append((b"vcgt", ("new", vcgt)))
+    off = 128 + 4 + 12 * len(order)
+    body, placed, table = b"", {}, []
+    for s, (kind, *rest) in order:
+        key = ("src", rest[0]) if kind == "src" else ("new", s)
+        if key not in placed:
+            blob = d[rest[0]:rest[0] + rest[1]] if kind == "src" else rest[0]
+            pad = (-off) % 4
+            body += b"\0" * pad
+            off += pad
+            placed[key] = (off, len(blob))
+            body += blob
+            off += len(blob)
+        table.append(struct.pack(">4sII", s, *placed[key]))
+    out = bytearray(d[:128] + struct.pack(">I", len(order)) + b"".join(table) + body)
+    out += b"\0" * ((-len(out)) % 4)
+    struct.pack_into(">I", out, 0, len(out))
+    tmp = bytearray(out)
+    tmp[44:48] = tmp[64:68] = b"\0" * 4
+    tmp[84:100] = b"\0" * 16
+    out[84:100] = hashlib.md5(tmp).digest()
+    return bytes(out)
+
+
+# ---------------------------------------------------------------- colord
+def proxy(path, iface):
+    return Gio.DBusProxy.new_for_bus_sync(Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE,
+                                          None, CD, path, iface, None)
+
+
+def prop(px, name):
+    v = px.get_cached_property(name)
+    return v.unpack() if v is not None else None
+
+
+def call(px, method, sig=None, *args):
+    params = GLib.Variant(sig, args) if sig else None
+    r = px.call_sync(method, params, Gio.DBusCallFlags.NONE, 5000, None)
+    return r.unpack() if r is not None else None
+
+
+def displays():
+    mgr = proxy("/org/freedesktop/ColorManager", CD)
+    res = []
+    for path in call(mgr, "GetDevicesByKind", "(s)", "display")[0]:
+        dev = proxy(path, CD + ".Device")
+        title = " ".join(x for x in (prop(dev, "Vendor"), prop(dev, "Model")) if x) or path
+        res.append((title, path))
+    return res
+
+
+def profile_filename(path):
+    return prop(proxy(path, CD + ".Profile"), "Filename") or ""
+
+
+def find_edid_profile(dev_path):
+    dev = proxy(dev_path, CD + ".Device")
+    for p in prop(dev, "Profiles") or []:
+        fn = profile_filename(p)
+        if os.path.basename(fn).startswith("edid-"):
+            return fn
+    md5 = (prop(dev, "Metadata") or {}).get("OutputEdidMd5")
+    if md5:
+        fn = os.path.join(ICC_DIR, f"edid-{md5}.icc")
+        if os.path.exists(fn):
+            return fn
+    return None
+
+
+def register(path):
+    """Return the colord object path of a profile file, creating it if needed."""
+    mgr = proxy("/org/freedesktop/ColorManager", CD)
+    with open(path, "rb") as f:
+        pid = "icc-" + hashlib.md5(f.read()).hexdigest()
+    for _ in range(2):
+        try:
+            return call(mgr, "FindProfileById", "(s)", pid)[0]
+        except GLib.Error:
+            pass
+        try:
+            return call(mgr, "CreateProfile", "(ssa{ss})", pid, "temp", {"Filename": path})[0]
+        except GLib.Error as e:
+            if "AlreadyExists" not in str(e):
+                raise
+    return call(mgr, "FindProfileById", "(s)", pid)[0]
+
+
+def is_ours(filename):
+    return os.path.basename(filename).startswith(PREFIX)
+
+
+def apply_profile(dev_path, icc_path):
+    obj = register(icc_path)
+    dev = proxy(dev_path, CD + ".Device")
+    current = prop(dev, "Profiles") or []
+    if obj not in current:
+        call(dev, "AddProfile", "(so)", "hard", obj)
+    call(dev, "MakeProfileDefault", "(o)", obj)
+    for p in current:
+        if p == obj:
+            continue
+        fn = profile_filename(p)
+        if is_ours(fn):
+            try:
+                call(dev, "RemoveProfile", "(o)", p)
+            except GLib.Error:
+                pass
+            if os.path.exists(fn):
+                os.remove(fn)
+
+
+def remove_ours(dev_path):
+    dev = proxy(dev_path, CD + ".Device")
+    for p in prop(dev, "Profiles") or []:
+        fn = profile_filename(p)
+        if is_ours(fn):
+            call(dev, "RemoveProfile", "(o)", p)
+            if os.path.exists(fn):
+                os.remove(fn)
+
+
+# ---------------------------------------------------------------- UI
+SLIDERS = [
+    ("black", 0, 64, 1, 0),
+    ("white", 160, 255, 1, 0),
+    ("gamma", 0.5, 2.0, 0.01, 2),
+    ("red", 50, 100, 1, 0),
+    ("green", 50, 100, 1, 0),
+    ("blue", 50, 100, 1, 0),
+]
+GRAY_LEVELS = [0, 4, 8, 12, 16, 20, 24, 32, 64, 96, 128, 160, 192, 224, 235, 240, 245, 250, 255]
+
+
+class Win(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title=T["title"])
+        self.set_default_size(560, -1)
+        self.set_icon_name(APP_ID)
+        self.params = dict(DEFAULTS)
+        try:
+            with open(CONF) as f:
+                self.params.update(json.load(f))
+        except (OSError, ValueError):
+            pass
+        self.pending = 0
+        self.loading = True
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{side}")(16)
+        self.set_child(box)
+
+        try:
+            self.devs = displays()
+        except GLib.Error:
+            self.devs = []
+        self.combo = Gtk.DropDown.new_from_strings([t for t, _ in self.devs] or [T["no_monitors"]])
+        box.append(self.combo)
+
+        self.scales = {}
+        grid = Gtk.Grid(column_spacing=12, row_spacing=4)
+        for row, (key, lo, hi, step, digits) in enumerate(SLIDERS):
+            lab = Gtk.Label(label=T[key], xalign=0)
+            sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, step)
+            sc.set_digits(digits)
+            sc.set_draw_value(True)
+            sc.set_hexpand(True)
+            sc.set_value(self.params[key])
+            sc.connect("value-changed", self.on_change, key)
+            grid.attach(lab, 0, row, 1, 1)
+            grid.attach(sc, 1, row, 1, 1)
+            self.scales[key] = sc
+        box.append(grid)
+
+        box.append(Gtk.Label(label=T["gray"], xalign=0, wrap=True))
+        box.append(self.gray_steps())
+
+        btns = Gtk.Box(spacing=8)
+        presets = [
+            (T["limited"], {"black": 16.0, "white": 235.0}),
+            (T["full"], {"black": 0.0, "white": 255.0}),
+            (T["reset"], {"gamma": 1.0, "red": 100.0, "green": 100.0, "blue": 100.0}),
+        ]
+        for name, vals in presets:
+            b = Gtk.Button(label=name)
+            b.connect("clicked", self.on_preset, vals)
+            btns.append(b)
+        box.append(btns)
+
+        off = Gtk.Button(label=T["off"])
+        off.connect("clicked", self.on_off)
+        box.append(off)
+
+        self.status = Gtk.Label(xalign=0, wrap=True)
+        box.append(self.status)
+        self.loading = False
+        self.status.set_text(T["hint"])
+
+    def gray_steps(self):
+        css = "".join(f".ct-g{v} {{ background-color: rgb({v},{v},{v}); }}" for v in GRAY_LEVELS)
+        provider = Gtk.CssProvider()
+        provider.load_from_string(css)
+        Gtk.StyleContext.add_provider_for_display(self.get_display(), provider,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        row = Gtk.Box(homogeneous=True, hexpand=True)
+        row.set_size_request(-1, 70)
+        for v in GRAY_LEVELS:
+            cell = Gtk.Box(hexpand=True)
+            cell.add_css_class(f"ct-g{v}")
+            cell.set_tooltip_text(str(v))
+            row.append(cell)
+        return row
+
+    def device(self):
+        i = self.combo.get_selected()
+        return self.devs[i][1] if self.devs and i < len(self.devs) else None
+
+    def on_change(self, scale, key):
+        self.params[key] = round(scale.get_value(), 2)
+        if self.loading:
+            return
+        if self.pending:
+            GLib.source_remove(self.pending)
+        self.pending = GLib.timeout_add(350, self.apply)
+
+    def on_preset(self, _btn, vals):
+        self.loading = True
+        for k, v in vals.items():
+            self.scales[k].set_value(v)
+            self.params[k] = v
+        self.loading = False
+        self.apply()
+
+    def on_off(self, _btn):
+        dev = self.device()
+        if not dev:
+            return
+        try:
+            remove_ours(dev)
+            self.status.set_text(T["turned_off"])
+        except GLib.Error as e:
+            self.status.set_text(T["error"] + e.message)
+
+    def apply(self):
+        self.pending = 0
+        dev = self.device()
+        if not dev:
+            self.status.set_text(T["no_device"])
+            return False
+        base = find_edid_profile(dev)
+        if not base:
+            self.status.set_text(T["no_edid"])
+            return False
+        p = self.params
+        summary = (f"black {p['black']:.0f}, white {p['white']:.0f}, gamma {p['gamma']:.2f}, "
+                   f"RGB {p['red']:.0f}/{p['green']:.0f}/{p['blue']:.0f}")
+        with open(base, "rb") as f:
+            data = build_profile(f.read(), p, "Color Tuner: " + summary)
+        os.makedirs(ICC_DIR, exist_ok=True)
+        path = os.path.join(ICC_DIR, PREFIX + hashlib.md5(data).hexdigest()[:12] + ".icc")
+        try:
+            if not os.path.exists(path):
+                with open(path, "wb") as f:
+                    f.write(data)
+            apply_profile(dev, path)
+            os.makedirs(os.path.dirname(CONF), exist_ok=True)
+            with open(CONF, "w") as f:
+                json.dump(p, f, indent=1)
+            self.status.set_text(T["applied"] + summary)
+        except GLib.Error as e:
+            self.status.set_text(T["error"] + e.message)
+        return False
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_activate(self):
+        (self.props.active_window or Win(self)).present()
+
+
+if __name__ == "__main__":
+    if "--version" in sys.argv:
+        print(f"color-tuner {__version__}")
+        sys.exit(0)
+    sys.exit(App().run([sys.argv[0]]))

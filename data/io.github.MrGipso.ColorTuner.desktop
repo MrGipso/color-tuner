@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Color Tuner
+Name[ru]=Настройка цвета монитора
+Comment=Adjust monitor black level, white level, gamma and RGB balance
+Comment[ru]=Ползунки уровня чёрного, белого, гаммы и баланса RGB
+Exec=@BINDIR@/color-tuner
+Icon=io.github.MrGipso.ColorTuner
+Terminal=false
+Categories=Settings;HardwareSettings;GTK;
+Keywords=color;colour;gamma;monitor;display;icc;calibration;RGB;
+Keywords[ru]=цвет;гамма;монитор;дисплей;калибровка;профиль;
+StartupWMClass=io.github.MrGipso.ColorTuner
